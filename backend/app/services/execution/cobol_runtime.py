@@ -112,6 +112,15 @@ class CobolRuntimeEngine:
             if k_upper.startswith("WS-"):
                 clean = k_upper[3:]
                 self._set_variable(clean, v)
+            if k_upper in ('CUSTOMER-STATUS', 'CUSTOMER_STATUS', 'CUST-STATUS', 'CUST_STATUS'):
+                self._set_variable('CUST-STATUS', v)
+                self._set_variable('CUSTOMER-STATUS', v)
+            if k_upper in ('GROSS-AMOUNT', 'GROSS_AMOUNT', 'WS-GROSS-AMOUNT'):
+                self._set_variable('WS-GROSS-AMOUNT', v)
+                self._set_variable('GROSS-AMOUNT', v)
+            if k_upper in ('TAX-RATE', 'TAX_RATE', 'WS-TAX-RATE'):
+                self._set_variable('WS-TAX-RATE', v)
+                self._set_variable('TAX-RATE', v)
 
         proc_div = self.program.divisions.get("PROCEDURE")
         if not proc_div or not proc_div.sections:
@@ -156,7 +165,7 @@ class CobolRuntimeEngine:
         cond = re.sub(r'\bLESS\s*THAN\s*OR\s*EQUAL\s*(?:TO)?\b', '<=', cond, flags=re.I)
         cond = re.sub(r'\bGREATER\s*THAN\b', '>', cond, flags=re.I)
         cond = re.sub(r'\bLESS\s*THAN\b', '<', cond, flags=re.I)
-        cond = re.sub(r'(?<![><!])=(?!=)', '==', cond)
+        cond = re.sub(r'(?<![><!=])=(?!=)', '==', cond)
 
         m = re.search(r'^(.*?)(==|!=|>=|<=|>|<)(.*)$', cond)
         if not m:
@@ -191,19 +200,30 @@ class CobolRuntimeEngine:
             if stmt.verb == 'IF':
                 cond_passed = self._eval_condition(stmt.raw_statement)
                 idx += 1
-                if not cond_passed:
-                    # Skip the dependent branch statement under IF
-                    if idx < len(stmts):
+                if idx < len(stmts):
+                    then_stmt = stmts[idx]
+                    has_else = "ELSE" in then_stmt.raw_statement.upper() or (idx + 1 < len(stmts) and "ELSE" in stmts[idx + 1].raw_statement.upper())
+                    if has_else:
+                        else_idx = idx + 1
+                        if cond_passed:
+                            if then_stmt.verb in ('STOP', 'GOBACK'):
+                                return True
+                            self._execute_statement(then_stmt)
+                        else:
+                            if else_idx < len(stmts):
+                                else_stmt = stmts[else_idx]
+                                if else_stmt.verb in ('STOP', 'GOBACK'):
+                                    return True
+                                self._execute_statement(else_stmt)
+                        idx = else_idx + 1
+                        continue
+                    else:
+                        if cond_passed:
+                            if then_stmt.verb in ('STOP', 'GOBACK'):
+                                return True
+                            self._execute_statement(then_stmt)
                         idx += 1
-                    continue
-                else:
-                    if idx < len(stmts):
-                        sub_stmt = stmts[idx]
-                        if sub_stmt.verb in ('STOP', 'GOBACK'):
-                            return True
-                        self._execute_statement(sub_stmt)
-                        idx += 1
-                    continue
+                        continue
             self._execute_statement(stmt)
             idx += 1
         return False

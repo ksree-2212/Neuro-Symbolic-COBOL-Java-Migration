@@ -2,6 +2,7 @@ import asyncio
 import io
 import json
 import os
+import re
 import shutil
 import zipfile
 from pathlib import Path
@@ -253,6 +254,12 @@ async def migrate_code(project_id: str, req: MigrationRequest):
         cursor.execute("SELECT content FROM files WHERE project_id = ? AND file_type = 'SOURCE' LIMIT 1", (project_id,))
         row = cursor.fetchone()
         cobol_source = row["content"] if row else ""
+
+        # Inline project copybooks so differential runtime has full record definitions
+        cursor.execute("SELECT file_name, content FROM files WHERE project_id = ? AND file_type = 'COPYBOOK'", (project_id,))
+        for cb_row in cursor.fetchall():
+            cb_base = Path(cb_row["file_name"]).stem
+            cobol_source = re.sub(rf'\bCOPY\s+{re.escape(cb_base)}\.?', cb_row["content"], cobol_source, flags=re.I)
 
         # Insert migration row before running repair loop to satisfy foreign key on attempts
         cursor.execute(

@@ -771,9 +771,11 @@
         if (cobBox) cobBox.textContent = data.content || "// Empty file";
         const selectedFile = fileList.find(f => f.file_id === fileId);
         if (selectedFile) {
-          const baseName = selectedFile.file_name.replace(/\.[^/.]+$/, "").toUpperCase();
+          const content = data.content || "";
+          const progMatch = content.match(/PROGRAM-ID\.\s*([A-Za-z0-9_-]+)/i);
+          const baseName = progMatch ? progMatch[1].trim() : selectedFile.file_name.replace(/\.[^/.]+$/, "").toUpperCase();
           const targetInput = document.getElementById("mig-target-name");
-          if (targetInput && (targetInput.value === "BILLING-SYSTEM" || !targetInput.value)) {
+          if (targetInput) {
             targetInput.value = baseName;
           }
         }
