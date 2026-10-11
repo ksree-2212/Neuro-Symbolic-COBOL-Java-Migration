@@ -320,14 +320,17 @@
           <span>Upload COBOL Files, COPYBOOKs or ZIP</span>
           <span style="font-size: 11px; color: var(--text-muted);">Supports .cob, .cbl, .cpy, .zip</span>
         </div>
-        <div style="border: 2px dashed var(--border); border-radius: 6px; padding: 24px; text-align: center; margin-bottom: 16px;">
+        <div id="drop-zone" ondragover="onDragOver(event)" ondragleave="onDragLeave(event)" ondrop="onDropFiles(event)" style="border: 2px dashed var(--border); border-radius: 6px; padding: 24px; text-align: center; margin-bottom: 16px; transition: all 0.2s ease;">
           <input type="file" id="file-uploader" multiple style="display: none;" onchange="onFilesSelected(event)">
           <p style="font-size: 13px; color: var(--text-muted); margin-bottom: 10px;">Drag and drop codebase or select files from filesystem</p>
           <button class="btn btn-secondary" onclick="document.getElementById('file-uploader').click()">Choose Files</button>
           <button class="btn btn-purple" onclick="loadSampleCorpus()" style="margin-left: 8px;">Load Sample Billing Corpus</button>
+          <div id="upload-feedback" style="margin-top: 12px; font-size: 13px; font-weight: 600; display: none;"></div>
         </div>
-        <div style="display: flex; justify-content: flex-end; gap: 10px;">
+        <div style="display: flex; justify-content: flex-end; gap: 10px; align-items: center; flex-wrap: wrap;">
+          <div id="index-feedback" style="font-size: 13px; font-weight: 600; display: none;"></div>
           <button class="btn btn-orange" onclick="analyzeAndIndex()">Analyze & Index Codebase</button>
+          <button class="btn btn-purple" id="btn-proceed-migration" onclick="switchTab('migration')" style="display: none;">Proceed to Migration (Steps 05–11) &rarr;</button>
         </div>
       </div>
     </div>
@@ -486,7 +489,12 @@
       <div class="card">
         <div class="card-title">
           <span>Original COBOL Source</span>
-          <span class="tag tag-blue">Source</span>
+          <div style="display: flex; gap: 8px; align-items: center;">
+            <select id="mig-source-file-select" onchange="onMigrateSourceFileSelected()" style="font-size: 11px; padding: 2px 6px; border: 1px solid var(--border); border-radius: 4px; background: white;">
+              <option value="">Select File...</option>
+            </select>
+            <span class="tag tag-blue">Source</span>
+          </div>
         </div>
         <div class="code-box" id="mig-cobol-code">// COBOL source will be loaded here</div>
       </div>
@@ -662,14 +670,16 @@
     document.querySelectorAll(".nav-btn").forEach(el => el.classList.remove("active"));
     const sec = document.getElementById("tab-" + tabId);
     if (sec) sec.style.display = "block";
-    event.target.classList.add("active");
+    const navBtn = Array.from(document.querySelectorAll(".nav-btn")).find(b => b.getAttribute("onclick") && b.getAttribute("onclick").includes(`'${tabId}'`));
+    if (navBtn) navBtn.classList.add("active");
 
     if (tabId === "graph") renderGraph();
     if (tabId === "capabilities") loadCapabilityMatrix();
+    if (tabId === "migration") loadMigrationSourceView();
   }
 
   // Load Projects
-  async function loadProjects() {
+  async function loadProjects(targetId = null) {
     try {
       const res = await fetch("/api/projects");
       projectList = await res.json();
@@ -677,6 +687,7 @@
       sel.innerHTML = "";
       if (projectList.length === 0) {
         sel.innerHTML = "<option value=''>No projects found</option>";
+        currentProjectId = null;
         return;
       }
       projectList.forEach(p => {
@@ -685,8 +696,13 @@
         opt.textContent = `${p.name} (${p.status})`;
         sel.appendChild(opt);
       });
-      currentProjectId = projectList[0].project_id;
-      onProjectChange();
+      if (targetId && projectList.some(p => p.project_id === targetId)) {
+        currentProjectId = targetId;
+      } else if (!currentProjectId || !projectList.some(p => p.project_id === currentProjectId)) {
+        currentProjectId = projectList[0].project_id;
+      }
+      sel.value = currentProjectId;
+      await onProjectChange();
     } catch (e) {
       console.error("Failed to load projects", e);
     }
@@ -696,8 +712,9 @@
     const sel = document.getElementById("project-selector");
     currentProjectId = sel.value;
     if (!currentProjectId) return;
-    loadProjectFiles();
-    loadAST();
+    await loadProjectFiles();
+    await loadAST();
+    await loadMigrationSourceView();
     initSSE();
   }
 
@@ -710,7 +727,151 @@
     });
     const data = await res.json();
     currentProjectId = data.project_id;
-    await loadProjects();
+    await loadProjects(data.project_id);
+  }
+
+  // Populate COBOL source file viewer in Tab 5
+  async function loadMigrationSourceView() {
+    if (!currentProjectId) return;
+    if (fileList.length === 0) {
+      await loadProjectFiles();
+    }
+    const sel = document.getElementById("mig-source-file-select");
+    if (!sel) return;
+    sel.innerHTML = "";
+    if (fileList.length === 0) {
+      sel.innerHTML = "<option value=''>No files uploaded yet</option>";
+      const cobBox = document.getElementById("mig-cobol-code");
+      if (cobBox) cobBox.textContent = "// Please upload COBOL files or load sample corpus in Tab 1";
+      return;
+    }
+    fileList.forEach(f => {
+      const opt = document.createElement("option");
+      opt.value = f.file_id;
+      opt.textContent = `${f.file_name} (${f.file_type})`;
+      sel.appendChild(opt);
+    });
+
+    const primary = fileList.find(f => f.file_type === "SOURCE") || fileList[0];
+    if (primary) {
+      sel.value = primary.file_id;
+      await onMigrateSourceFileSelected();
+    }
+  }
+
+  async function onMigrateSourceFileSelected() {
+    const sel = document.getElementById("mig-source-file-select");
+    const fileId = sel ? sel.value : null;
+    if (!fileId || !currentProjectId) return;
+    try {
+      const res = await fetch(`/api/projects/${currentProjectId}/files/${fileId}`);
+      if (res.ok) {
+        const data = await res.json();
+        const cobBox = document.getElementById("mig-cobol-code");
+        if (cobBox) cobBox.textContent = data.content || "// Empty file";
+        const selectedFile = fileList.find(f => f.file_id === fileId);
+        if (selectedFile) {
+          const baseName = selectedFile.file_name.replace(/\.[^/.]+$/, "").toUpperCase();
+          const targetInput = document.getElementById("mig-target-name");
+          if (targetInput && (targetInput.value === "BILLING-SYSTEM" || !targetInput.value)) {
+            targetInput.value = baseName;
+          }
+        }
+      }
+    } catch (e) {
+      console.warn("Could not load source file content", e);
+    }
+  }
+
+  // Handle files selected via file chooser dialog
+  async function onFilesSelected(event) {
+    const files = event.target.files;
+    if (!files || files.length === 0) return;
+    await uploadSelectedFiles(files);
+    event.target.value = ""; // Reset input so selecting the same file again triggers change event
+  }
+
+  // Drag and drop handlers
+  function onDragOver(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const zone = document.getElementById("drop-zone");
+    if (zone) {
+      zone.style.borderColor = "var(--primary)";
+      zone.style.background = "#eff6ff";
+    }
+  }
+
+  function onDragLeave(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    const zone = document.getElementById("drop-zone");
+    if (zone) {
+      zone.style.borderColor = "var(--border)";
+      zone.style.background = "transparent";
+    }
+  }
+
+  async function onDropFiles(event) {
+    event.preventDefault();
+    event.stopPropagation();
+    onDragLeave(event);
+    const files = event.dataTransfer.files;
+    if (!files || files.length === 0) return;
+    await uploadSelectedFiles(files);
+  }
+
+  // Upload files to current project
+  async function uploadSelectedFiles(files) {
+    const feedback = document.getElementById("upload-feedback");
+    try {
+      if (!currentProjectId) {
+        if (feedback) {
+          feedback.style.display = "block";
+          feedback.style.color = "var(--primary)";
+          feedback.textContent = "Initializing new project...";
+        }
+        await createProject();
+      }
+
+      if (feedback) {
+        feedback.style.display = "block";
+        feedback.style.color = "var(--primary)";
+        feedback.textContent = `Uploading ${files.length} file(s)...`;
+      }
+
+      const formData = new FormData();
+      for (let i = 0; i < files.length; i++) {
+        formData.append("files", files[i]);
+      }
+
+      const res = await fetch(`/api/projects/${currentProjectId}/upload`, {
+        method: "POST",
+        body: formData
+      });
+
+      if (!res.ok) {
+        const errText = await res.text();
+        throw new Error(errText || "Upload failed");
+      }
+
+      const data = await res.json();
+      if (feedback) {
+        feedback.style.color = "var(--success)";
+        feedback.textContent = `Successfully uploaded ${data.count || files.length} file(s)!`;
+        setTimeout(() => { feedback.style.display = "none"; }, 4000);
+      }
+
+      await loadProjectFiles();
+      await loadMigrationSourceView();
+    } catch (e) {
+      console.error("Upload failed", e);
+      if (feedback) {
+        feedback.style.display = "block";
+        feedback.style.color = "var(--danger)";
+        feedback.textContent = `Upload error: ${e.message}`;
+      }
+    }
   }
 
   async function loadSampleCorpus() {
@@ -797,6 +958,7 @@
     }
 
     await loadProjectFiles();
+    await loadMigrationSourceView();
   }
 
   async function loadProjectFiles() {
@@ -827,8 +989,21 @@
   }
 
   async function analyzeAndIndex() {
-    if (!currentProjectId) return;
+    if (!currentProjectId) {
+      alert("Please select or initialize a project first.");
+      return;
+    }
     setPipelineStep(1, "running");
+    document.getElementById("pipeline-live-status").textContent = "INDEXING...";
+    document.getElementById("pipeline-live-status").className = "tag tag-blue";
+
+    const feedback = document.getElementById("index-feedback");
+    if (feedback) {
+      feedback.style.display = "block";
+      feedback.style.color = "var(--primary)";
+      feedback.textContent = "Parsing AST, extracting symbols, and building Vector + Graph indexes...";
+    }
+
     const res = await fetch(`/api/projects/${currentProjectId}/analyze`, { method: "POST" });
     const summary = await res.json();
     
@@ -839,11 +1014,21 @@
     setPipelineStep(2, "success");
     setPipelineStep(3, "success");
     setPipelineStep(4, "success");
-    document.getElementById("pipeline-live-status").textContent = "INDEXED";
+    document.getElementById("pipeline-live-status").textContent = "INDEXED (STEPS 01–04 COMPLETE)";
     document.getElementById("pipeline-live-status").className = "tag tag-pass";
 
-    loadAST();
-    loadProjectFiles();
+    if (feedback) {
+      feedback.style.color = "var(--success)";
+      feedback.innerHTML = `✓ Indexing Complete! Stages 01–04 finished. Next: proceed to Migration to run Stages 05–11.`;
+    }
+    const btnProceed = document.getElementById("btn-proceed-migration");
+    if (btnProceed) {
+      btnProceed.style.display = "inline-flex";
+    }
+
+    await loadAST();
+    await loadProjectFiles();
+    await loadMigrationSourceView();
   }
 
   async function loadAST() {
@@ -1033,13 +1218,20 @@
 
   // Run Migration
   async function runMigration(baseline = false) {
-    if (!currentProjectId) return;
+    if (!currentProjectId) {
+      alert("Please select or initialize a project first.");
+      return;
+    }
     const targetName = document.getElementById("mig-target-name").value;
     const targetMode = document.getElementById("mig-target-mode").value;
     const maxRepairs = parseInt(document.getElementById("mig-max-repairs").value) || 3;
 
     setPipelineStep(5, "running");
+    setPipelineStep(6, "running");
+    setPipelineStep(7, "running");
     document.getElementById("mig-java-status").textContent = "GENERATING...";
+    document.getElementById("pipeline-live-status").textContent = baseline ? "RUNNING BASELINE..." : "RUNNING NEURO-SYMBOLIC MIGRATION...";
+    document.getElementById("pipeline-live-status").className = "tag tag-blue";
 
     const res = await fetch(`/api/projects/${currentProjectId}/migrate`, {
       method: "POST",
@@ -1065,6 +1257,18 @@
     const isPass = data.final_status === 'VERIFIED';
     const isUnverified = data.final_status === 'UNVERIFIED_NO_JDK' || data.final_status === 'TOOLCHAIN_UNAVAILABLE';
     document.getElementById("mig-java-status").className = `tag ${isPass ? 'tag-pass' : (isUnverified ? 'tag-orange' : 'tag-fail')}`;
+
+    // Update Pipeline Progress Tracker for Stages 05 through 11
+    setPipelineStep(5, "success"); // Retrieval
+    setPipelineStep(6, "success"); // Context Asm
+    setPipelineStep(7, "success"); // Java Gen
+    setPipelineStep(8, data.compilation_passed ? "success" : (isUnverified ? "warning" : "error")); // Compile
+    setPipelineStep(9, data.tests_passed === data.tests_total ? "success" : (data.tests_passed > 0 ? "warning" : "error")); // Diff Tests
+    setPipelineStep(10, "success"); // Repair
+    setPipelineStep(11, isPass ? "success" : (isUnverified ? "warning" : "error")); // Final Verif
+
+    document.getElementById("pipeline-live-status").textContent = isPass ? "VERIFIED (100% EQUIVALENT)" : (isUnverified ? "UNVERIFIED (NO JDK)" : "VERIFICATION FAILED");
+    document.getElementById("pipeline-live-status").className = `tag ${isPass ? 'tag-pass' : (isUnverified ? 'tag-orange' : 'tag-fail')}`;
 
     // Update Verification Dashboard
     const compStat = document.getElementById("verif-compile-stat");
