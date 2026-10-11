@@ -1,0 +1,29 @@
+# Environment configuration
+.env
+
+# Runtime workspace & temporary databases
+workspace/
+*.db
+*.sqlite
+*.sqlite3
+
+# Python cache & bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Logs
+*.log
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Java build artifacts
+target/
+*.class
