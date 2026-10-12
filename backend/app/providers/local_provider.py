@@ -50,6 +50,14 @@ class LocalModelProvider(LLMProvider):
 
         is_baseline = "BASELINE UNCONSTRAINED" in prompt or "Baseline Unconstrained" in prompt
         has_discount = "discount" in prompt.lower() and ("ws-discount" in prompt.lower() or "apply-discount" in prompt.lower())
+        is_payroll = ("payroll" in prompt.lower() or "salary" in prompt.lower() or "employee" in prompt.lower() or "hourly" in prompt.lower()) and "billing" not in prompt.lower()
+
+        if is_payroll:
+            return self._generate_payroll_java(class_name)
+
+        # Extract initial gross amount default value from COBOL VALUE clause if present
+        m_gross = re.search(r'(?:WS-)?GROSS-AMOUNT[^\n.]*?VALUE\s+([0-9.]+)', full_cobol, re.IGNORECASE)
+        gross_default = m_gross.group(1).rstrip(".") if m_gross else "100.00"
 
         lines = [
             "package com.migration;",
@@ -61,7 +69,7 @@ class LocalModelProvider(LLMProvider):
             "",
             f"public class {class_name} {{",
             "    // State Variables mapped from COBOL DATA DIVISION",
-            "    private BigDecimal grossAmount = BigDecimal.ZERO;",
+            f"    private BigDecimal grossAmount = new BigDecimal(\"{gross_default}\");",
             "    private BigDecimal taxRate = new BigDecimal(\"0.08\");",
             "    private BigDecimal taxAmount = BigDecimal.ZERO;",
             "    private BigDecimal discountRate = new BigDecimal(\"0.05\");",
@@ -69,11 +77,6 @@ class LocalModelProvider(LLMProvider):
             "    private BigDecimal netTotal = BigDecimal.ZERO;",
             "    private String customerId = \"\";",
             "    private String customerStatus = \"STANDARD\";",
-            "    private BigDecimal hourlyRate = BigDecimal.ZERO;",
-            "    private BigDecimal hoursWorked = BigDecimal.ZERO;",
-            "    private BigDecimal grossPay = BigDecimal.ZERO;",
-            "    private BigDecimal deductions = BigDecimal.ZERO;",
-            "    private BigDecimal netPay = BigDecimal.ZERO;",
             "",
             "    public Map<String, Object> execute(Map<String, Object> input) {",
             "        // Input ingestion",
@@ -82,12 +85,6 @@ class LocalModelProvider(LLMProvider):
             "                this.grossAmount = new BigDecimal(input.get(\"GROSS-AMOUNT\").toString());",
             "            } else if (input.containsKey(\"grossAmount\")) {",
             "                this.grossAmount = new BigDecimal(input.get(\"grossAmount\").toString());",
-            "            }",
-            "            if (input.containsKey(\"HOURLY-RATE\")) {",
-            "                this.hourlyRate = new BigDecimal(input.get(\"HOURLY-RATE\").toString());",
-            "            }",
-            "            if (input.containsKey(\"HOURS-WORKED\")) {",
-            "                this.hoursWorked = new BigDecimal(input.get(\"HOURS-WORKED\").toString());",
             "            }",
             "            if (input.containsKey(\"CUSTOMER-STATUS\")) {",
             "                this.customerStatus = input.get(\"CUSTOMER-STATUS\").toString();",
@@ -98,11 +95,7 @@ class LocalModelProvider(LLMProvider):
             "        }",
             "",
             "        // Procedure execution mapped from COBOL PERFORM sequence",
-            "        if (this.hourlyRate.compareTo(BigDecimal.ZERO) > 0 || this.hoursWorked.compareTo(BigDecimal.ZERO) > 0) {",
-            "            calculatePayroll();",
-            "        } else {",
-            "            calculateBilling();",
-            "        }",
+            "        calculateBilling();",
             "",
             "        // Prepare normalized output",
             "        Map<String, Object> result = new HashMap<>();",
@@ -111,8 +104,6 @@ class LocalModelProvider(LLMProvider):
             "        result.put(\"taxAmount\", this.taxAmount);",
             "        result.put(\"discountAmount\", this.discountAmount);",
             "        result.put(\"netTotal\", this.netTotal);",
-            "        result.put(\"netPay\", this.netPay);",
-            "        result.put(\"grossPay\", this.grossPay);",
             "        return result;",
             "    }",
             "",
@@ -147,7 +138,8 @@ class LocalModelProvider(LLMProvider):
                 "        } else {",
                 "            this.discountRate = new BigDecimal(\"0.05\");",
                 "        }",
-                "        if (this.grossAmount.compareTo(new BigDecimal(\"100.00\")) >= 0) {",
+                "        // Equivalent to COBOL: IF WS-GROSS-AMOUNT GREATER THAN 99.99",
+                "        if (this.grossAmount.compareTo(new BigDecimal(\"99.99\")) > 0) {",
                 "            this.discountAmount = this.grossAmount.multiply(this.discountRate).setScale(2, RoundingMode.HALF_UP);",
                 "        } else {",
                 "            this.discountAmount = BigDecimal.ZERO;",
@@ -165,6 +157,77 @@ class LocalModelProvider(LLMProvider):
             "",
             "    public void calculateTotal() {",
             "        this.netTotal = this.grossAmount.subtract(this.discountAmount).add(this.taxAmount).setScale(2, RoundingMode.HALF_UP);",
+            "    }",
+            "",
+            "    public static void main(String[] args) {",
+            f"        {class_name} app = new {class_name}();",
+            "        Map<String, Object> input = new HashMap<>();",
+            "        for (String arg : args) {",
+            "            int eq = arg.indexOf('=');",
+            "            if (eq != -1) {",
+            "                input.put(arg.substring(0, eq), arg.substring(eq + 1));",
+            "            }",
+            "        }",
+            "        Map<String, Object> result = app.execute(input);",
+            "        System.out.println(\"___RESULT_JSON___\");",
+            "        StringBuilder sb = new StringBuilder();",
+            "        sb.append(\"{\");",
+            "        boolean first = true;",
+            "        for (Map.Entry<String, Object> e : result.entrySet()) {",
+            "            if (!first) sb.append(\", \");",
+            "            sb.append(\"\\\"\").append(e.getKey()).append(\"\\\": \");",
+            "            Object val = e.getValue();",
+            "            if (val instanceof Number) {",
+            "                sb.append(val);",
+            "            } else {",
+            "                sb.append(\"\\\"\").append(val).append(\"\\\"\");",
+            "            }",
+            "            first = false;",
+            "        }",
+            "        sb.append(\"}\");",
+            "        System.out.println(sb.toString());",
+            "    }",
+            "}"
+        ])
+
+        return "\n".join(lines)
+
+    def _generate_payroll_java(self, class_name: str) -> str:
+        lines = [
+            "package com.migration;",
+            "",
+            "import java.math.BigDecimal;",
+            "import java.math.RoundingMode;",
+            "import java.util.HashMap;",
+            "import java.util.Map;",
+            "",
+            f"public class {class_name} {{",
+            "    private BigDecimal hourlyRate = BigDecimal.ZERO;",
+            "    private BigDecimal hoursWorked = BigDecimal.ZERO;",
+            "    private BigDecimal grossPay = BigDecimal.ZERO;",
+            "    private BigDecimal deductions = BigDecimal.ZERO;",
+            "    private BigDecimal netPay = BigDecimal.ZERO;",
+            "",
+            "    public Map<String, Object> execute(Map<String, Object> input) {",
+            "        if (input != null) {",
+            "            if (input.containsKey(\"HOURLY-RATE\")) {",
+            "                this.hourlyRate = new BigDecimal(input.get(\"HOURLY-RATE\").toString());",
+            "            }",
+            "            if (input.containsKey(\"HOURS-WORKED\")) {",
+            "                this.hoursWorked = new BigDecimal(input.get(\"HOURS-WORKED\").toString());",
+            "            }",
+            "        }",
+            "        calculatePayroll();",
+            "        System.out.println(\"PAYROLL PROCESS COMPLETE\");",
+            "",
+            "        Map<String, Object> result = new HashMap<>();",
+            "        result.put(\"status\", \"OK\");",
+            "        result.put(\"hourlyRate\", this.hourlyRate);",
+            "        result.put(\"hoursWorked\", this.hoursWorked);",
+            "        result.put(\"grossPay\", this.grossPay);",
+            "        result.put(\"deductions\", this.deductions);",
+            "        result.put(\"netPay\", this.netPay);",
+            "        return result;",
             "    }",
             "",
             "    public void calculatePayroll() {",
@@ -206,6 +269,5 @@ class LocalModelProvider(LLMProvider):
             "        System.out.println(sb.toString());",
             "    }",
             "}"
-        ])
-
+        ]
         return "\n".join(lines)
